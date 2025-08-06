@@ -7,28 +7,31 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import markdown
+import numpy as np
 import yaml
 from fastmcp import FastMCP
-from whoosh import index
-from whoosh.fields import ID, TEXT, Schema
-from whoosh.highlight import UppercaseFormatter
-from whoosh.qparser import MultifieldParser
+from pymilvus import (
+    Collection,
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    MilvusClient,
+    connections,
+    utility,
+)
+from pymilvus.model.dense import SentenceTransformerEmbeddingFunction
+from pymilvus.model.sparse.bm25 import BM25EmbeddingFunction
+from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
+from sklearn.metrics.pairwise import cosine_similarity
 
-try:
-    import numpy as np
-    from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    VECTOR_SEARCH_AVAILABLE = True
-except ImportError:
-    VECTOR_SEARCH_AVAILABLE = False
+VECTOR_SEARCH_AVAILABLE = True
+SPARSE_SEARCH_AVAILABLE = True
 
 mcp = FastMCP("MkDocs RAG Server 🔍")
 
@@ -43,18 +46,131 @@ _project_root = None
 class DocsSearcher:
     """Handles document indexing and searching for retrieval augmented generation."""
 
-    def __init__(self, docs_dir: str = "docs"):
+    def __init__(self, docs_dir: str = "docs", project_root: Optional[Path] = None):
         self.docs_dir = Path(docs_dir)
-        self.index_dir = None
-        self.ix = None
-        self.model = None
+        self.project_root = project_root or Path.cwd()
+        self.index_dir = self.project_root / ".mkdocs_vector"
+        self.collection = None
+        self.collection_name = "mkdocs_documents"
+        self.milvus_connected = False
         self.embeddings = {}
+        self.metadata = {}
+        self.milvus_client = None
+        self.bm25_ef = None
+        self.sentence_transformer_ef = None
 
+        # Initialize file paths regardless of storage type
+        self.embeddings_file = self.index_dir / "embeddings.npz"
+        self.metadata_file = self.index_dir / "metadata.yaml"
+
+        # Initialize embedding functions for vector search
         if VECTOR_SEARCH_AVAILABLE:
             try:
-                self.model = SentenceTransformer("all-MiniLM-L6-v2")
-            except:
-                self.model = None
+                self.sentence_transformer_ef = SentenceTransformerEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2", device="cpu"
+                )
+                self._init_milvus()
+            except Exception as e:
+                print(f"Failed to initialize vector search: {e}", file=sys.stderr)
+                self.sentence_transformer_ef = None
+
+    def _init_milvus(self):
+        """Initialize Milvus connection and collection."""
+        try:
+            # Ensure index directory exists
+            self.index_dir.mkdir(exist_ok=True)
+
+            # Initialize MilvusClient for easier API
+            self.milvus_client = MilvusClient(uri=str(self.index_dir / "milvus.db"))
+
+            # Connect to Milvus Lite (local file-based instance)
+            connections.connect(
+                alias="default",
+                host="localhost",
+                port="19530",
+                # Use local file storage
+                uri=str(self.index_dir / "milvus.db"),
+            )
+            self.milvus_connected = True
+
+            # Check if collection exists
+            if utility.has_collection(self.collection_name):
+                self.collection = Collection(self.collection_name)
+                self.collection.load()
+            else:
+                self._create_collection()
+
+        except Exception as e:
+            print(
+                f"Milvus initialization failed, using file-based storage: {e}",
+                file=sys.stderr,
+            )
+            self.milvus_connected = False
+            # Fall back to simple file-based storage
+            self._init_file_storage()
+
+    def _init_file_storage(self):
+        """Initialize simple file-based storage for vectors."""
+        self.index_dir.mkdir(exist_ok=True)
+
+        # Load existing embeddings if available
+        if self.embeddings_file.exists() and self.metadata_file.exists():
+            try:
+                data = np.load(self.embeddings_file, allow_pickle=True)
+                self.embeddings = {k: v for k, v in data.items()}
+
+                with open(self.metadata_file, "r") as f:
+                    self.metadata = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"Failed to load existing index: {e}", file=sys.stderr)
+                self.embeddings = {}
+                self.metadata = {}
+        else:
+            self.embeddings = {}
+            self.metadata = {}
+
+    def _create_collection(self):
+        """Create Milvus collection with schema."""
+        # Define schema - only include sparse vector field if available
+        fields = [
+            FieldSchema(
+                name="doc_id", dtype=DataType.INT64, is_primary=True, auto_id=True
+            ),
+            FieldSchema(name="path", dtype=DataType.VARCHAR, max_length=500),
+            FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=500),
+            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="headings", dtype=DataType.VARCHAR, max_length=5000),
+            FieldSchema(
+                name="embedding", dtype=DataType.FLOAT_VECTOR, dim=384
+            ),  # all-MiniLM-L6-v2 dimension
+        ]
+
+        # Only add sparse vector field if the functionality is available
+        if SPARSE_SEARCH_AVAILABLE:
+            fields.append(
+                FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR)
+            )
+
+        schema = CollectionSchema(fields, "MkDocs documentation collection")
+
+        # Create collection
+        self.collection = Collection(self.collection_name, schema)
+
+        # Create index for dense vector field
+        index_params = {
+            "index_type": "IVF_FLAT",
+            "metric_type": "L2",
+            "params": {"nlist": 128},
+        }
+        self.collection.create_index("embedding", index_params)
+
+        # Create index for sparse vector field if available
+        if SPARSE_SEARCH_AVAILABLE:
+            sparse_index_params = {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "IP",  # Inner Product for sparse vectors
+            }
+            self.collection.create_index("sparse_vector", sparse_index_params)
 
     def _extract_text_from_markdown(
         self, file_path: Path
@@ -81,101 +197,219 @@ class DocsSearcher:
             return file_path.stem, "", []
 
     def build_index(self) -> dict[str, Any]:
-        """Build the Whoosh search index."""
+        """Build the search index."""
         try:
-            # Create temporary index directory
-            self.index_dir = tempfile.mkdtemp()
+            # Ensure index directory exists
+            self.index_dir.mkdir(exist_ok=True)
 
-            # Define schema
-            schema = Schema(
-                path=ID(stored=True),
-                title=TEXT(stored=True),
-                content=TEXT(stored=True),
-                headings=TEXT(stored=True),
-            )
+            # Collect all documents
+            documents = []
+            paths = []
+            titles = []
+            contents = []
+            headings_list = []
+            embeddings = []
+            sparse_vectors = []
 
-            # Create index
-            self.ix = index.create_in(self.index_dir, schema)
-            writer = self.ix.writer()
+            # Initialize BM25 embedding function for sparse vectors
+            if SPARSE_SEARCH_AVAILABLE:
+                self.bm25_ef = BM25EmbeddingFunction(
+                    analyzer=build_default_analyzer(language="en")
+                )
 
-            # Index all markdown files
             indexed_count = 0
             for file_path in self.docs_dir.rglob("*.md"):
                 relative_path = file_path.relative_to(self.docs_dir)
                 title, content, headings = self._extract_text_from_markdown(file_path)
 
-                writer.add_document(
-                    path=str(relative_path),
-                    title=title,
-                    content=content,
-                    headings=" ".join(headings),
-                )
+                paths.append(str(relative_path))
+                titles.append(title)
+                contents.append(
+                    content[:65535] if len(content) > 65535 else content
+                )  # Truncate if too long
+                headings_list.append(" ".join(headings)[:5000] if headings else "")
 
-                # Build embeddings if vector search is available
-                if VECTOR_SEARCH_AVAILABLE and self.model:
-                    full_text = f"{title} {' '.join(headings)} {content}"
-                    embedding = self.model.encode(full_text)
-                    self.embeddings[str(relative_path)] = embedding
+                # Store document text for embeddings
+                full_text = f"{title} {' '.join(headings)} {content}"
+                documents.append(full_text)
 
                 indexed_count += 1
 
-            writer.commit()
+            # Generate dense embeddings using SentenceTransformerEmbeddingFunction
+            if VECTOR_SEARCH_AVAILABLE and self.sentence_transformer_ef and documents:
+                embeddings = self.sentence_transformer_ef.encode_documents(documents)
 
-            return {
-                "success": True,
-                "indexed_files": indexed_count,
-                "index_location": self.index_dir,
-                "vector_search_available": VECTOR_SEARCH_AVAILABLE
-                and self.model is not None,
-            }
+            # Fit BM25 model and generate sparse vectors
+            if SPARSE_SEARCH_AVAILABLE and self.bm25_ef and documents:
+                self.bm25_ef.fit(documents)
+                sparse_vectors = self.bm25_ef.encode_documents(documents)
+
+            if indexed_count == 0:
+                return {
+                    "success": True,
+                    "indexed_files": 0,
+                    "index_location": str(self.index_dir),
+                    "message": "No markdown files found to index",
+                }
+
+            # Store in Milvus or file storage
+            if self.milvus_connected and self.collection:
+                # Clear existing data
+                if self.collection.num_entities > 0:
+                    self.collection.delete("doc_id >= 0")
+
+                # Insert new data
+                entities = [
+                    paths,
+                    titles,
+                    contents,
+                    headings_list,
+                    embeddings,
+                ]
+
+                # Only add sparse vectors if available
+                if SPARSE_SEARCH_AVAILABLE and sparse_vectors.ndim > 0:
+                    entities.append(sparse_vectors)
+
+                self.collection.insert(entities)
+                self.collection.flush()
+                self.collection.load()
+
+                return {
+                    "success": True,
+                    "indexed_files": indexed_count,
+                    "index_location": str(self.index_dir),
+                    "vector_search_available": True,
+                    "storage_type": "milvus",
+                }
+            else:
+                # Use file-based storage
+                self.embeddings = {}
+                self.metadata = {}
+
+                for i, path in enumerate(paths):
+                    if i < len(embeddings) if embeddings else 0:
+                        self.embeddings[path] = np.array(embeddings[i])
+
+                    self.metadata[path] = {
+                        "title": titles[i],
+                        "content": contents[i],
+                        "headings": headings_list[i],
+                    }
+
+                # Save to files
+                if self.embeddings:
+                    np.savez_compressed(self.embeddings_file, **self.embeddings)
+
+                with open(self.metadata_file, "w") as f:
+                    yaml.dump(self.metadata, f)
+
+                return {
+                    "success": True,
+                    "indexed_files": indexed_count,
+                    "index_location": str(self.index_dir),
+                    "vector_search_available": bool(self.embeddings),
+                    "storage_type": "file",
+                }
+
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def keyword_search(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
-        """Perform keyword-based search using Whoosh."""
-        if not self.ix:
-            self.build_index()
+        """Perform keyword-based search using Milvus sparse vectors (BM25) or fallback."""
+        # Check if we can use Milvus sparse search
+        if SPARSE_SEARCH_AVAILABLE and self.milvus_connected and self.milvus_client:
+            try:
+                # Check if BM25 model is fitted
+                if not self.bm25_ef:
+                    # Rebuild index to fit BM25 model
+                    self.build_index()
 
+                # Generate sparse vector for the query
+                if self.bm25_ef:
+                    query_sparse_vec = self.bm25_ef.encode_queries([query])[0]
+
+                    # Search using sparse vector
+                    results = self.milvus_client.search(
+                        collection_name=self.collection_name,
+                        data=[query_sparse_vec],
+                        anns_field="sparse_vector",
+                        limit=max_results,
+                        output_fields=["path", "title", "content"],
+                        search_params={
+                            "metric_type": "IP"
+                        },  # Inner Product for sparse vectors
+                    )
+
+                    # Format results
+                    formatted_results = []
+                    if results and len(results) > 0:
+                        for hit in results[0]:
+                            content = hit["entity"].get("content", "")
+                            snippet = (
+                                content[:300] + "..." if len(content) > 300 else content
+                            )
+
+                            formatted_results.append({
+                                "path": hit["entity"].get("path", ""),
+                                "title": hit["entity"].get("title", ""),
+                                "score": hit[
+                                    "distance"
+                                ],  # Higher is better for IP metric
+                                "snippet": snippet,
+                            })
+
+                    return formatted_results
+
+            except Exception as e:
+                print(f"Sparse search failed: {e}", file=sys.stderr)
+
+        # Use fallback keyword search
+        return self._fallback_keyword_search(query, max_results)
+
+    def _fallback_keyword_search(
+        self, query: str, max_results: int = 10
+    ) -> list[dict[str, Any]]:
+        """Simple fallback keyword search when Milvus sparse search is not available."""
         results = []
-        with self.ix.searcher() as searcher:
-            # Search in multiple fields
-            parser = MultifieldParser(["title", "content", "headings"], self.ix.schema)
-            q = parser.parse(query)
+        query_lower = query.lower()
 
-            search_results = searcher.search(q, limit=max_results)
+        # Search in metadata
+        for path, meta in self.metadata.items():
+            title = meta.get("title", "").lower()
+            content = meta.get("content", "").lower()
+            headings = meta.get("headings", "").lower()
 
-            # Highlight formatter
-            formatter = UppercaseFormatter()
+            # Simple scoring based on occurrences
+            score = 0
+            score += title.count(query_lower) * 3  # Title matches are more important
+            score += headings.count(query_lower) * 2  # Heading matches are important
+            score += content.count(query_lower)
 
-            for hit in search_results:
-                # Get highlighted content
-                highlighted = hit.highlights("content", top=3)
-                if not highlighted:
-                    # If no highlights, get a snippet
-                    content = hit["content"]
-                    snippet = content[:300] + "..." if len(content) > 300 else content
-                else:
-                    snippet = highlighted
-
+            if score > 0:
+                snippet = content[:300] + "..." if len(content) > 300 else content[:300]
                 results.append({
-                    "path": hit["path"],
-                    "title": hit["title"],
-                    "score": hit.score,
+                    "path": path,
+                    "title": meta.get("title", ""),
+                    "score": score,
                     "snippet": snippet,
                 })
 
-        return results
+        # Sort by score and return top results
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:max_results]
 
     def vector_search(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         """Perform semantic vector search."""
-        if not VECTOR_SEARCH_AVAILABLE or not self.model:
+        if not VECTOR_SEARCH_AVAILABLE or not self.sentence_transformer_ef:
             return []
 
         if not self.embeddings:
             self.build_index()
 
-        # Encode query
-        query_embedding = self.model.encode(query)
+        # Encode query using SentenceTransformerEmbeddingFunction
+        query_embeddings = self.sentence_transformer_ef.encode_queries([query])
+        query_embedding = np.array(query_embeddings[0])
 
         # Calculate similarities
         similarities = []
@@ -215,11 +449,13 @@ class DocsSearcher:
 _searcher = None
 
 
-def get_searcher(docs_dir: str = "docs") -> DocsSearcher:
+def get_searcher(
+    docs_dir: str = "docs", project_root: Optional[Path] = None
+) -> DocsSearcher:
     """Get or create the global searcher instance."""
     global _searcher
     if _searcher is None:
-        _searcher = DocsSearcher(docs_dir)
+        _searcher = DocsSearcher(docs_dir, project_root)
     return _searcher
 
 
@@ -353,10 +589,12 @@ def keyword_search_impl(
         Search results with snippets and relevance scores
     """
     try:
-        searcher = get_searcher(docs_dir)
+        searcher = get_searcher(docs_dir, _project_root)
 
         # Ensure index is built
-        if not searcher.ix:
+        if not hasattr(searcher, "metadata") or (
+            not searcher.metadata and not searcher.milvus_connected
+        ):
             index_result = searcher.build_index()
             if not index_result["success"]:
                 return index_result
@@ -412,16 +650,18 @@ def vector_search_impl(
                 "error": "Vector search is not available. Install sentence-transformers: pip install sentence-transformers",
             }
 
-        searcher = get_searcher(docs_dir)
+        searcher = get_searcher(docs_dir, _project_root)
 
-        if not searcher.model:
+        if not searcher.sentence_transformer_ef:
             return {
                 "success": False,
-                "error": "Failed to load the sentence transformer model",
+                "error": "Failed to load the sentence transformer embedding function",
             }
 
         # Ensure embeddings are built
-        if not searcher.embeddings:
+        if not hasattr(searcher, "embeddings") or (
+            not searcher.embeddings and not searcher.milvus_connected
+        ):
             index_result = searcher.build_index()
             if not index_result["success"]:
                 return index_result
@@ -563,7 +803,7 @@ def rebuild_search_index(docs_dir: str = "docs") -> dict[str, Any]:
         Information about the rebuilt index
     """
     try:
-        searcher = get_searcher(docs_dir)
+        searcher = get_searcher(docs_dir, _project_root)
         result = searcher.build_index()
         return result
     except Exception as e:

@@ -29,9 +29,9 @@ dependencies = [
     "markdown>=3.8.2",
     "numpy>=2.3.2",
     "pyyaml>=6.0.2",
-    "scikit-learn>=1.7.1",
+    "pymilvus[model]>=2.4.0",
     "sentence-transformers>=5.0.0",
-    "whoosh>=2.7.4",
+    "nltk>=3.9.1",
 ]
 
 [project.optional-dependencies]
