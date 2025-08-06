@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/dongookson/serena",
+        "serena-mcp-server",
+        "--context",
+        "ide-assistant"
+      ],
+      "env": {}
+    }
+  }
+}
