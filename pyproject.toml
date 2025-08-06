@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mkdocs-mcp-plugin"
+version = "0.1.0"
+description = "MCP server for MkDocs documentation with intelligent search and retrieval capabilities"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Dongook Son", email = "d@dou.so" }
+]
+keywords = ["mkdocs", "mcp", "documentation", "search", "rag", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Documentation",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Markup",
+]
+
+dependencies = [
+    "fastmcp>=2.11.1",
+    "markdown>=3.8.2",
+    "numpy>=2.3.2",
+    "pyyaml>=6.0.2",
+    "scikit-learn>=1.7.1",
+    "sentence-transformers>=5.0.0",
+    "whoosh>=2.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[project.urls]
+Homepage = "https://github.com/dongookson/mkdocs-mcp-plugin"
+Documentation = "https://github.com/dongookson/mkdocs-mcp-plugin#readme"
+Repository = "https://github.com/dongookson/mkdocs-mcp-plugin.git"
+Issues = "https://github.com/dongookson/mkdocs-mcp-plugin/issues"
+
+[project.scripts]
+mkdocs-mcp = "server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = ["server.py", "README.md", "pyproject.toml"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "ARG", "SIM"]
+ignore = ["E501", "W503", "E203"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]

@@ -1,0 +1,11 @@
+site_name: Test Documentation
+site_description: Test MkDocs project for MCP plugin
+site_author: Test Author
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Reference: api.md
