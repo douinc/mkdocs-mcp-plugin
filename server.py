@@ -722,7 +722,7 @@ def initialize_mkdocs_integration():
         return False
 
     # Start MkDocs serve
-    port = int(os.environ.get("MKDOCS_PORT", "8000"))
+    port = int(os.getenv("MKDOCS_PORT", "8000"))
     _mkdocs_thread = start_mkdocs_serve(_project_root, port)
 
     # Wait a moment for server to start
@@ -752,7 +752,7 @@ def get_mkdocs_info() -> dict[str, Any]:
         return {"success": False, "error": "No MkDocs project loaded"}
 
     server_running = _mkdocs_process is not None and _mkdocs_process.poll() is None
-    port = int(os.environ.get("MKDOCS_PORT", "8000"))
+    port = int(os.getenv("MKDOCS_PORT", "8000"))
 
     return {
         "success": True,
@@ -789,7 +789,7 @@ def restart_mkdocs_server(port: int | None = None) -> dict[str, Any]:
 
     # Start new server
     if port is None:
-        port = int(os.environ.get("MKDOCS_PORT", "8000"))
+        port = int(os.getenv("MKDOCS_PORT", "8000"))
 
     _mkdocs_thread = start_mkdocs_serve(_project_root, port)
     time.sleep(2)  # Wait for server to start

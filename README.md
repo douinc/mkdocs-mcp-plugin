@@ -262,38 +262,35 @@ All search operations return results in this format:
 
 ## Integration Examples
 
-### Claude Desktop Configuration
+### Claude Code Configuration
 
-Add to your Claude Desktop config:
+Add to your Claude Code config:
 
 ```json
 {
   "mcpServers": {
-    "mkdocs": {
+    "mkdocs-mcp": {
       "command": "uvx",
-      "args": ["mkdocs-mcp-plugin"],
+      "args": [
+        "--from",
+        "git+https://github.com/douinc/mkdocs-mcp-plugin",
+        "--with",
+        "mkdocs-material",
+        "--with",
+        "mkdocs-git-revision-date-localized-plugin",
+        "--with",
+        "mkdocs-minify-plugin",
+        "--with",
+        "mkdocs-mermaid2-plugin",
+        "--with",
+        "mkdocs-print-site-plugin",
+        "mkdocs-mcp"
+      ],
       "env": {
         "MKDOCS_PORT": "8000"
       }
     }
   }
-}
-```
-
-### Continue.dev Configuration
-
-```json
-{
-  "models": [...],
-  "contextProviders": [
-    {
-      "name": "mkdocs-mcp",
-      "params": {
-        "serverPath": "mkdocs-mcp",
-        "docs_dir": "docs"
-      }
-    }
-  ]
 }
 ```
 
