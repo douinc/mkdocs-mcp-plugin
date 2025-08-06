@@ -223,10 +223,9 @@ def get_searcher(docs_dir: str = "docs") -> DocsSearcher:
     return _searcher
 
 
-@mcp.tool
-def read_document(file_path: str, docs_dir: str = "docs") -> dict[str, Any]:
+def read_document_impl(file_path: str, docs_dir: str = "docs") -> dict[str, Any]:
     """
-    Read a specific documentation file.
+    Implementation for reading a specific documentation file.
 
     Args:
         file_path: Path to the documentation file relative to docs_dir
@@ -265,9 +264,23 @@ def read_document(file_path: str, docs_dir: str = "docs") -> dict[str, Any]:
 
 
 @mcp.tool
-def list_documents(docs_dir: str = "docs") -> dict[str, Any]:
+def read_document(file_path: str, docs_dir: str = "docs") -> dict[str, Any]:
     """
-    List all documentation files available for retrieval.
+    Read a specific documentation file.
+
+    Args:
+        file_path: Path to the documentation file relative to docs_dir
+        docs_dir: The documentation directory
+
+    Returns:
+        The document content and metadata
+    """
+    return read_document_impl(file_path, docs_dir)
+
+
+def list_documents_impl(docs_dir: str = "docs") -> dict[str, Any]:
+    """
+    Implementation for listing all documentation files available for retrieval.
 
     Args:
         docs_dir: The documentation directory to scan
@@ -312,11 +325,24 @@ def list_documents(docs_dir: str = "docs") -> dict[str, Any]:
 
 
 @mcp.tool
-def keyword_search(
+def list_documents(docs_dir: str = "docs") -> dict[str, Any]:
+    """
+    List all documentation files available for retrieval.
+
+    Args:
+        docs_dir: The documentation directory to scan
+
+    Returns:
+        A list of all markdown files and their metadata
+    """
+    return list_documents_impl(docs_dir)
+
+
+def keyword_search_impl(
     query: str, max_results: int = 10, docs_dir: str = "docs"
 ) -> dict[str, Any]:
     """
-    Search documentation using keyword-based search.
+    Implementation for searching documentation using keyword-based search.
 
     Args:
         query: The search query
@@ -348,11 +374,28 @@ def keyword_search(
 
 
 @mcp.tool
-def vector_search(
+def keyword_search(
     query: str, max_results: int = 10, docs_dir: str = "docs"
 ) -> dict[str, Any]:
     """
-    Search documentation using semantic vector search.
+    Search documentation using keyword-based search.
+
+    Args:
+        query: The search query
+        max_results: Maximum number of results to return
+        docs_dir: The documentation directory to search
+
+    Returns:
+        Search results with snippets and relevance scores
+    """
+    return keyword_search_impl(query, max_results, docs_dir)
+
+
+def vector_search_impl(
+    query: str, max_results: int = 10, docs_dir: str = "docs"
+) -> dict[str, Any]:
+    """
+    Implementation for searching documentation using semantic vector search.
 
     Args:
         query: The search query
@@ -397,6 +440,24 @@ def vector_search(
 
 
 @mcp.tool
+def vector_search(
+    query: str, max_results: int = 10, docs_dir: str = "docs"
+) -> dict[str, Any]:
+    """
+    Search documentation using semantic vector search.
+
+    Args:
+        query: The search query
+        max_results: Maximum number of results to return
+        docs_dir: The documentation directory to search
+
+    Returns:
+        Search results with snippets and similarity scores
+    """
+    return vector_search_impl(query, max_results, docs_dir)
+
+
+@mcp.tool
 def search(
     query: str,
     search_type: str = "hybrid",
@@ -417,13 +478,13 @@ def search(
     """
     try:
         if search_type == "keyword":
-            return keyword_search(query, max_results, docs_dir)
+            return keyword_search_impl(query, max_results, docs_dir)
         elif search_type == "vector":
-            return vector_search(query, max_results, docs_dir)
+            return vector_search_impl(query, max_results, docs_dir)
         elif search_type == "hybrid":
             # Perform both searches
-            keyword_results = keyword_search(query, max_results, docs_dir)
-            vector_results = vector_search(query, max_results, docs_dir)
+            keyword_results = keyword_search_impl(query, max_results, docs_dir)
+            vector_results = vector_search_impl(query, max_results, docs_dir)
 
             # Combine results
             if not keyword_results["success"]:
@@ -512,7 +573,7 @@ def rebuild_search_index(docs_dir: str = "docs") -> dict[str, Any]:
 @mcp.resource("mkdocs://documents")
 def get_documents_info() -> dict[str, Any]:
     """Get information about available documents for retrieval."""
-    result = list_documents()
+    result = list_documents_impl()
     if result["success"]:
         return {
             "document_count": result["document_count"],
