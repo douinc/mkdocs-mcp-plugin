@@ -242,7 +242,22 @@ class DocsSearcher:
             # Fit BM25 model and generate sparse vectors
             if SPARSE_SEARCH_AVAILABLE and self.bm25_ef and documents:
                 self.bm25_ef.fit(documents)
-                sparse_vectors = self.bm25_ef.encode_documents(documents)
+                sparse_vectors_raw = self.bm25_ef.encode_documents(documents)
+                
+                # Convert sparse vectors to dict format expected by Milvus
+                sparse_vectors = []
+                for sparse_vec in sparse_vectors_raw:
+                    sparse_dict = {}
+                    if hasattr(sparse_vec, 'tocoo'):
+                        # Convert to COO format first if needed
+                        coo = sparse_vec.tocoo()
+                        for i, v in zip(coo.col, coo.data):
+                            sparse_dict[int(i)] = float(v)
+                    else:
+                        # Already in COO format
+                        for i, v in zip(sparse_vec.col, sparse_vec.data):
+                            sparse_dict[int(i)] = float(v)
+                    sparse_vectors.append(sparse_dict)
 
             if indexed_count == 0:
                 return {
@@ -268,7 +283,7 @@ class DocsSearcher:
                 ]
 
                 # Only add sparse vectors if available
-                if SPARSE_SEARCH_AVAILABLE and sparse_vectors.ndim > 0:
+                if SPARSE_SEARCH_AVAILABLE and sparse_vectors:
                     entities.append(sparse_vectors)
 
                 self.collection.insert(entities)
@@ -328,11 +343,24 @@ class DocsSearcher:
                 # Generate sparse vector for the query
                 if self.bm25_ef:
                     query_sparse_vec = self.bm25_ef.encode_queries([query])[0]
+                    
+                    # Convert sparse vector to dict format expected by Milvus
+                    # Milvus expects sparse vectors as dict with indices as keys and values as values
+                    sparse_dict = {}
+                    if hasattr(query_sparse_vec, 'tocoo'):
+                        # Convert to COO format first if needed
+                        coo = query_sparse_vec.tocoo()
+                        for i, v in zip(coo.col, coo.data):
+                            sparse_dict[int(i)] = float(v)
+                    else:
+                        # Already in COO format
+                        for i, v in zip(query_sparse_vec.col, query_sparse_vec.data):
+                            sparse_dict[int(i)] = float(v)
 
                     # Search using sparse vector
                     results = self.milvus_client.search(
                         collection_name=self.collection_name,
-                        data=[query_sparse_vec],
+                        data=[sparse_dict],  # Pass sparse vector as dict
                         anns_field="sparse_vector",
                         limit=max_results,
                         output_fields=["path", "title", "content"],
