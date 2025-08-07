@@ -994,19 +994,44 @@ def start_mkdocs_serve(project_root: Path, port: int = 8000):
 
 def stop_mkdocs_serve():
     """Stop the MkDocs development server."""
-    global _mkdocs_process
+    global _mkdocs_process, _mkdocs_thread
 
     if _mkdocs_process:
         try:
+            # First try to terminate gracefully
+            print("Stopping MkDocs server...", file=sys.stderr)
             _mkdocs_process.terminate()
-            _mkdocs_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _mkdocs_process.kill()
-            _mkdocs_process.wait()
+            
+            # Wait for process to terminate
+            try:
+                _mkdocs_process.wait(timeout=5)
+                print("MkDocs server stopped gracefully.", file=sys.stderr)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't terminate
+                print("MkDocs server did not stop gracefully, forcing shutdown...", file=sys.stderr)
+                _mkdocs_process.kill()
+                _mkdocs_process.wait(timeout=2)
+                print("MkDocs server forcefully stopped.", file=sys.stderr)
+                
         except Exception as e:
             print(f"Error stopping MkDocs server: {e}", file=sys.stderr)
+            # Try to kill the process if it still exists
+            try:
+                if _mkdocs_process.poll() is None:
+                    _mkdocs_process.kill()
+            except:
+                pass
         finally:
             _mkdocs_process = None
+    
+    # Also ensure the thread is properly joined
+    if _mkdocs_thread and _mkdocs_thread.is_alive():
+        try:
+            _mkdocs_thread.join(timeout=1)
+        except:
+            pass
+        finally:
+            _mkdocs_thread = None
 
 
 def initialize_mkdocs_integration():
@@ -1133,16 +1158,42 @@ def restart_mkdocs_server(port: int | None = None) -> dict[str, Any]:
 # Cleanup function
 def cleanup():
     """Clean up resources on exit."""
-    global _searcher
+    global _searcher, _mkdocs_process
 
     print("\nShutting down MkDocs RAG Server...", file=sys.stderr)
 
     # Stop MkDocs server
     stop_mkdocs_serve()
 
-    # Clean up search index
+    # Clean up search index and Milvus connection
     if _searcher:
-        _searcher.cleanup()
+        try:
+            # Close Milvus connection if it exists
+            if hasattr(_searcher, 'milvus_connected') and _searcher.milvus_connected:
+                try:
+                    if _searcher.collection:
+                        _searcher.collection.release()
+                    connections.disconnect("default")
+                    print("Milvus connection closed.", file=sys.stderr)
+                except Exception as e:
+                    print(f"Error closing Milvus connection: {e}", file=sys.stderr)
+            
+            # Clean up temporary files
+            _searcher.cleanup()
+            print("Search index cleaned up.", file=sys.stderr)
+        except Exception as e:
+            print(f"Error during searcher cleanup: {e}", file=sys.stderr)
+        finally:
+            _searcher = None
+
+    # Final check to ensure MkDocs process is terminated
+    if _mkdocs_process:
+        try:
+            if _mkdocs_process.poll() is None:
+                _mkdocs_process.kill()
+                print("Ensured MkDocs process termination.", file=sys.stderr)
+        except:
+            pass
 
     print("Cleanup complete.", file=sys.stderr)
 
@@ -1153,46 +1204,61 @@ atexit.register(cleanup)
 
 # Handle signals for graceful shutdown
 def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\nReceived signal {signum}, initiating graceful shutdown...", file=sys.stderr)
     cleanup()
     sys.exit(0)
 
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+# On Windows, also handle SIGBREAK
+if hasattr(signal, 'SIGBREAK'):
+    signal.signal(signal.SIGBREAK, signal_handler)
 
 
 def main():
     """Main entry point for the MCP server."""
-    # Initialize MkDocs integration
-    mkdocs_initialized = initialize_mkdocs_integration()
+    try:
+        # Initialize MkDocs integration
+        mkdocs_initialized = initialize_mkdocs_integration()
 
-    # Adjust default docs_dir based on project
-    if _project_root and _mkdocs_config:
-        docs_dir = _mkdocs_config.get("docs_dir", "docs")
-        # Update the default docs_dir for all tools
-        default_docs_dir = str(_project_root / docs_dir)
+        # Adjust default docs_dir based on project
+        if _project_root and _mkdocs_config:
+            docs_dir = _mkdocs_config.get("docs_dir", "docs")
+            # Update the default docs_dir for all tools
+            default_docs_dir = str(_project_root / docs_dir)
 
-        # Monkey-patch the default parameter for tools
-        # This ensures tools use the correct docs directory
-        import inspect
+            # Monkey-patch the default parameter for tools
+            # This ensures tools use the correct docs directory
+            import inspect
 
-        for name, func in inspect.getmembers(sys.modules[__name__]):
-            if hasattr(func, "__mcp_tool__"):
-                sig = inspect.signature(func)
-                params = sig.parameters
-                if "docs_dir" in params:
-                    # Update default value
-                    new_params = []
-                    for param_name, param in params.items():
-                        if param_name == "docs_dir":
-                            new_param = param.replace(default=default_docs_dir)
-                            new_params.append(new_param)
-                        else:
-                            new_params.append(param)
-                    func.__signature__ = sig.replace(parameters=new_params)
+            for name, func in inspect.getmembers(sys.modules[__name__]):
+                if hasattr(func, "__mcp_tool__"):
+                    sig = inspect.signature(func)
+                    params = sig.parameters
+                    if "docs_dir" in params:
+                        # Update default value
+                        new_params = []
+                        for param_name, param in params.items():
+                            if param_name == "docs_dir":
+                                new_param = param.replace(default=default_docs_dir)
+                                new_params.append(new_param)
+                            else:
+                                new_params.append(param)
+                        func.__signature__ = sig.replace(parameters=new_params)
 
-    # Run the MCP server
-    mcp.run()
+        # Run the MCP server
+        mcp.run()
+    except KeyboardInterrupt:
+        print("\nReceived keyboard interrupt, shutting down...", file=sys.stderr)
+        cleanup()
+        sys.exit(0)
+    except Exception as e:
+        print(f"\nUnexpected error: {e}", file=sys.stderr)
+        cleanup()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
