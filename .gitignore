@@ -104,3 +104,5 @@ site/
 
 # Search index temporary directories
 **/index_*
+test_mkdocs_project/.mkdocs_vector/milvus.db
+test_mkdocs_project
