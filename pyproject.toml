@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mkdocs-mcp-plugin"
-version = "0.4.0"
+version = "0.4.1"
 description = "MCP server for MkDocs documentation with intelligent search and retrieval capabilities"
 readme = "README.md"
 license = { text = "MIT" }
